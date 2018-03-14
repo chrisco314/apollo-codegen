@@ -177,6 +177,12 @@ yargs
         describe: "Merge fragment fields onto its enclosing type",
         default: true,
         type: 'boolean'
+      },
+      "codable": {
+        demand: true,
+        describe: "Generate Swift Codable types",
+        default: true,
+        type: 'boolean'
       }
     },
     argv => {
@@ -200,6 +206,7 @@ yargs
         operationIdsPath: argv["operation-ids-path"],
         generateOperationIds: !!argv["operation-ids-path"],
         mergeInFieldsFromFragmentSpreads: argv["merge-in-fields-from-fragment-spreads"],
+        codable: !!argv['codable'],
         useFlowExactObjects: argv['use-flow-exact-objects'],
         useFlowReadOnlyTypes: argv['use-flow-read-only-types'],
       };

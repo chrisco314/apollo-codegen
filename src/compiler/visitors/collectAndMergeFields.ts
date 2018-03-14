@@ -13,6 +13,17 @@ export function collectAndMergeFields(
   selectionSet: SelectionSet,
   mergeInFragmentSpreads: Boolean = true
 ): Field[] {
+  return collectAndMergeFieldsFromSelections(
+    selectionSet.selections,
+    selectionSet.possibleTypes,
+    mergeInFragmentSpreads)
+}
+
+export function collectAndMergeFieldsFromSelections(
+  selections: Selection[],
+  possibleTypes: GraphQLObjectType[],
+  mergeInFragmentSpreads: Boolean = true
+): Field[] {
   const groupedFields: Map<string, Field[]> = new Map();
 
   function visitSelectionSet(
@@ -60,7 +71,7 @@ export function collectAndMergeFields(
     }
   }
 
-  visitSelectionSet(selectionSet.selections, selectionSet.possibleTypes);
+  visitSelectionSet(selections, possibleTypes);
 
   // Merge selection sets
 
@@ -98,8 +109,8 @@ export function collectAndMergeFields(
   });
 
   // Replace field descriptions with type-specific descriptions if possible
-  if (selectionSet.possibleTypes.length == 1) {
-    const type = selectionSet.possibleTypes[0];
+  if (possibleTypes.length == 1) {
+    const type = possibleTypes[0];
     const fieldDefMap = type.getFields();
 
     for (const field of fields) {

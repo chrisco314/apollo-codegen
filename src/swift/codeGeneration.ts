@@ -11,7 +11,7 @@ import {
   GraphQLInputObjectType
 } from 'graphql';
 
-import { CompilerContext, Operation, Fragment, SelectionSet, Field } from '../compiler';
+import { CompilerContext, Operation, Fragment, SelectionSet, Field, FragmentSpread, Selection } from '../compiler';
 
 import { join, wrap } from '../utilities/printing';
 
@@ -22,9 +22,10 @@ import { isList } from '../utilities/graphql';
 import { typeCaseForSelectionSet, TypeCase, Variant } from '../compiler/visitors/typeCase';
 import { collectFragmentsReferenced } from '../compiler/visitors/collectFragmentsReferenced';
 import { generateOperationId } from '../compiler/visitors/generateOperationId';
-import { collectAndMergeFields } from '../compiler/visitors/collectAndMergeFields';
+import { collectAndMergeFields, collectAndMergeFieldsFromSelections } from '../compiler/visitors/collectAndMergeFields';
 
 import '../utilities/array';
+import { FragmentSpreadNode } from 'graphql';
 
 export interface Options {
   namespace?: string;
@@ -35,9 +36,79 @@ export interface Options {
 export function generateSource(
   context: CompilerContext,
   outputIndividualFiles: boolean,
-  only?: string
+  options: any,
+  only?: string,
 ): SwiftAPIGenerator {
   const generator = new SwiftAPIGenerator(context);
+
+  console.log("generateSource")
+  // context.options.passthroughCustomScalars
+
+  if (options.codable) {
+
+    console.log("Generating codable types")
+
+    generator.withinFile(`Types.graphql.swift`, () => {
+      generator.fileHeader();
+
+      generator.namespaceDeclaration(context.options.namespace, () => {
+        context.typesUsed.forEach(type => {
+          generator.typeDeclarationForGraphQLType(type);
+        });
+      });
+    });
+
+    const inputFilePaths = new Set<string>();
+
+    Object.values(context.operations).forEach(operation => {
+      inputFilePaths.add(operation.filePath);
+    });
+
+    Object.values(context.fragments).forEach(fragment => {
+      inputFilePaths.add(fragment.filePath);
+    });
+
+    for (const inputFilePath of inputFilePaths) {
+      if (only && inputFilePath !== only) continue;
+
+      generator.withinFile(`${path.basename(inputFilePath)}.codable.swift`, () => {
+        generator.fileHeader();
+
+        generator.namespaceExtensionDeclaration(context.options.namespace, () => {
+
+          Object.values(context.fragments).forEach(fragment => {
+            if (fragment.filePath === inputFilePath) {
+              console.log(fragment.filePath)
+              generator.createFragmentProtocols(fragment);
+            }
+          });
+        });
+      });
+
+      generator.withinFile(`${path.basename(inputFilePath)}.swift`, () => {
+        generator.fileHeader();
+
+        generator.namespaceExtensionDeclaration(context.options.namespace, () => {
+
+          Object.values(context.fragments).forEach(fragment => {
+            if (fragment.filePath === inputFilePath) {
+              console.log(fragment.filePath)
+              generator.structDeclarationForFragment(fragment);
+            }
+          });
+
+          Object.values(context.operations).forEach(operation => {
+            if (operation.filePath === inputFilePath) {
+              generator.classDeclarationForOperation(operation);
+            }
+          });
+        });
+      });
+    }
+
+    console.log("Returning from generateSource")
+    return generator
+  }
 
   if (outputIndividualFiles) {
     generator.withinFile(`Types.graphql.swift`, () => {
@@ -89,13 +160,16 @@ export function generateSource(
         generator.typeDeclarationForGraphQLType(type);
       });
 
+      // legacy struct protocols
+      Object.values(context.fragments).forEach(fragment => {
+        console.log(fragment.filePath)
+        generator.structDeclarationForFragment(fragment);
+      });
+      // operation types: queries and mutations
       Object.values(context.operations).forEach(operation => {
         generator.classDeclarationForOperation(operation);
       });
 
-      Object.values(context.fragments).forEach(fragment => {
-        generator.structDeclarationForFragment(fragment);
-      });
     });
   }
 
@@ -215,9 +289,210 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
     );
   }
 
+  createFragmentProtocols({ filePath, fragmentName, type, selectionSet, source }: Fragment) {
+    const structName = this.helpers.structNameForFragmentName(fragmentName)
+
+    const typeCase = typeCaseForSelectionSet(
+      selectionSet,
+      this.context.options.mergeInFieldsFromFragmentSpreads
+    );
+
+    function flattenFragment(name: string, selections: Selection[]): Field[] {
+      console.log(`flattenFragment: ${name}`)
+
+      return selections
+        .filter(field => field.kind == "Field" ? field.name != "__typename" : true)
+        .flatMap(selection => {
+          if (selection.kind == "Field") {
+            console.log(`Flatten field: ${selection.name}`)
+            return [selection] as Field[]
+          }
+
+          else if (selection.kind == "FragmentSpread") {
+            console.log(`Flatten recurse: ${selection.fragmentName}`)
+            return flattenFragment(selection.fragmentName, selection.selectionSet!.selections)
+          }
+
+          return [] as Field[]
+        })
+    }
+
+    if (fragmentName == "BedEncounter") {
+      let flat = flattenFragment(fragmentName, typeCase.default.selections)
+      console.log("I stop for BedEncounterModel")
+    }
+
+
+    const allFields = collectAndMergeFieldsFromSelections(
+      flattenFragment(fragmentName, typeCase.default.selections),
+      typeCase.default.possibleTypes,
+      this.context.options.mergeInFieldsFromFragmentSpreads)
+      .map(field => this.helpers.propertyFromField(field as Field))
+      .filter(field => { return field.name != "__typename" });
+
+    const fragmentFields = collectAndMergeFields(
+      typeCase.default,
+      this.context.options.mergeInFieldsFromFragmentSpreads)
+      .map(field => this.helpers.propertyFromField(field as Field))
+      .filter(field => { return field.name != "__typename" });
+    let compositeRelations = fragmentFields.filter(field => {
+      return field.selectionSet != undefined
+        && field.selectionSet!.selections.length != 1
+    })
+
+    for (const relation of compositeRelations) {
+
+      const relationTypeCase = typeCaseForSelectionSet(
+        relation.selectionSet!,
+        this.context.options.mergeInFieldsFromFragmentSpreads
+      );
+
+      const relationInlineFragment = collectAndMergeFields(
+        relationTypeCase.default,
+        this.context.options.mergeInFieldsFromFragmentSpreads)
+        .map(field => this.helpers.propertyFromField(field as Field))
+        .filter(field => { return field.name != "__typename" });
+
+      let subFragmentNames = relation.selectionSet!.selections
+        .filter(selection => { return selection.kind == "FragmentSpread" })
+        .map(selection => {
+          return (selection as FragmentSpread).fragmentName
+        })
+
+      // if we have a single nested atomic fragment
+      if (subFragmentNames.length == 1 && relationInlineFragment.length == 0) {
+        console.log(`Skipping  ${relation.structName}`)
+      }
+
+      // case of custom relation fragment
+      else {
+        // create model class for inline relation
+        let relationSet: SelectionSet = relation.selectionSet!
+        this.createFragmentProtocols({
+          filePath, fragmentName: relation.structName,
+          source, type, selectionSet: relationSet
+        })
+        // this.simpleModelClass(relation.structName, [relation.structName], relationInlineFragment)
+      }
+
+      // this.classDeclaration(relation.structName + "Model")
+    }
+
+    let fragmentNames = typeCase.default.selections
+    .filter(selection => { return selection.kind == "FragmentSpread" })
+    .map(selection => {
+      return (selection as FragmentSpread).fragmentName
+    })
+    if (fragmentNames.length == 0) {
+      fragmentNames = ["Codable"]
+    }
+
+    this.printOnNewline("// Creating protocol")
+    const protocolName = structName
+    console.log(`creating protocol: ${protocolName}:${fragmentNames[0]}`)
+    this.protocolDeclaration(
+      {
+        protocolName,
+        adoptedProtocols: fragmentNames
+      },
+      () => {
+        fragmentFields.forEach(field => {
+          let { propertyName, typeName } = field;
+
+          let fragments: FragmentSpread[] = []
+          if (field.selectionSet) {
+            fragments = field.selectionSet.selections
+              .filter(field => field.kind == "Field" ? field.name != "__typename" : true)
+              .filter(field => field.kind == "FragmentSpread")
+              .map(field => field as FragmentSpread)
+            if (fragments.length == 1) {
+              typeName = fragments[0].fragmentName
+            }
+          }
+          this.comment(field.description);
+          this.deprecationAttributes(field.isDeprecated, field.deprecationReason);
+          this.printOnNewline(`var ${escapeIdentifierIfNeeded(propertyName)}: ${typeName} { get }`);
+        });
+      }
+    );
+
+    const className = this.simpleModelClass(structName, [protocolName], allFields)
+    const firstAlias = allFields.find(field => field.alias != undefined)
+    if (firstAlias) {
+      this.printNewline()
+      this.printOnNewline(`extension ${className}`)
+      this.withinBlock(() => {
+        this.printOnNewline("private enum CodingKeys: String, CodingKey")
+        this.withinBlock(() => {
+          allFields.forEach(field => {
+            const { name, alias } = field;
+            this.printOnNewline(`case ${alias || name} = "${name}"`)
+          });
+        })
+      })
+    }
+  }
+
+  modelClassName(baseName: string): string {
+    return `${baseName}Model`
+  }
+
+  simpleModelClass(baseName: string, adoptedProtocols: string[], fields: (Field & Property & Struct)[]): string {
+    const className = this.modelClassName(baseName)
+    this.classDeclaration(
+      {
+        className,
+        modifiers: [],
+        adoptedProtocols: adoptedProtocols
+      },
+      () => {
+
+        let properties = fields.map(field => {
+          const { propertyName, name, typeName, type, isOptional } = field;
+          return { name, propertyName, type, typeName, isOptional };
+        });
+
+        this.printNewline();
+        this.initializerDeclarationForProperties(properties);
+
+        // fields
+        this.printNewline();
+
+        fields.forEach(field => {
+          const { responseKey, propertyName, name, alias, typeName, type, isOptional, isConditional } = field;
+
+          const unmodifiedFieldType = getNamedType(type);
+
+          // this.printNewlineIfNeeded();
+          // this.comment(field.description);
+          this.deprecationAttributes(field.isDeprecated, field.deprecationReason);
+          this.printOnNewline(`public var ${escapeIdentifierIfNeeded(propertyName)}: ${typeName}`);
+        });
+      }
+    );
+
+    return className
+  }
+
+  // fieldsFrom(selections: Selection[]): Field[] {
+  //   return selections
+  //     .filter(fragment => { return fragment.kind == "Field" })
+  //     .map(field => this.helpers.propertyFromField(field as Field))
+  //     .filter(field => { return field.name != "__typename" })
+  // }
+
+  protocolField(field: Field & Property) {
+    const { propertyName, typeName } = field;
+    this.comment(field.description);
+    this.deprecationAttributes(field.isDeprecated, field.deprecationReason);
+    this.printOnNewline(`var ${escapeIdentifierIfNeeded(propertyName)}: ${typeName} { get }`);
+  }
+
+
   structDeclarationForFragment({ fragmentName, selectionSet, source }: Fragment) {
     const structName = this.helpers.structNameForFragmentName(fragmentName);
 
+    this.printOnNewline("// structDeclarationForFragment")
     this.structDeclarationForSelectionSet(
       {
         structName,
@@ -241,10 +516,10 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
       adoptedProtocols = ['GraphQLSelectionSet'],
       selectionSet
     }: {
-      structName: string;
-      adoptedProtocols?: string[];
-      selectionSet: SelectionSet;
-    },
+        structName: string;
+        adoptedProtocols?: string[];
+        selectionSet: SelectionSet;
+      },
     before?: Function
   ) {
     const typeCase = typeCaseForSelectionSet(
@@ -282,14 +557,17 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
       variant,
       typeCase
     }: {
-      structName: string;
-      adoptedProtocols?: string[];
-      variant: Variant;
-      typeCase?: TypeCase;
-    },
+        structName: string;
+        adoptedProtocols?: string[];
+        variant: Variant;
+        typeCase?: TypeCase;
+      },
     before?: Function,
     after?: Function
   ) {
+
+    this.printOnNewline("// starting structDeclarationForVariant")
+
     this.structDeclaration({ structName, adoptedProtocols }, () => {
       if (before) {
         before();
