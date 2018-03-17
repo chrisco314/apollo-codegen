@@ -48,6 +48,7 @@ export function typeCaseForSelectionSet(
           variant.fragmentSpreads.push(selection);
 
           if (!mergeInFragmentSpreads) {
+            // console.log(`Adding ${selection.fragmentName}`)
             variant.selections.push(selection);
           }
         }

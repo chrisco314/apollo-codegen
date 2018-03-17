@@ -38,6 +38,35 @@ export class Helpers {
 
   // Types
 
+  isNativeType(type: GraphQLType): boolean {
+    if (type instanceof GraphQLScalarType) {
+      return true
+    }
+
+    else if (type instanceof GraphQLNonNull
+      || type instanceof GraphQLList) {
+      return this.isNativeType(type.ofType);
+    }
+
+    else {
+      return false
+    }
+  }
+
+  isListType(type: GraphQLType): boolean {
+    if (type instanceof GraphQLList) {
+      return true
+    }
+
+    else if (type instanceof GraphQLNonNull) {
+      return type.ofType instanceof GraphQLList
+    }
+
+    else {
+      return false
+    }
+  }
+
   typeNameFromGraphQLType(type: GraphQLType, unmodifiedTypeName?: string, isOptional?: boolean): string {
     if (type instanceof GraphQLNonNull) {
       return this.typeNameFromGraphQLType(type.ofType, unmodifiedTypeName, false);

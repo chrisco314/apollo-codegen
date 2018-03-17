@@ -107,10 +107,9 @@ export function generateSource(
     }
 
     console.log("Returning from generateSource")
-    return generator
   }
 
-  if (outputIndividualFiles) {
+  else if (outputIndividualFiles) {
     generator.withinFile(`Types.graphql.swift`, () => {
       generator.fileHeader();
 
@@ -242,9 +241,14 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
 
         if (fragmentsReferenced.size > 0) {
           this.printNewlineIfNeeded();
-          this.printOnNewline('public static var requestString: String { return operationString');
-          fragmentsReferenced.forEach(fragmentName => {
-            this.print(`.appending(${this.helpers.structNameForFragmentName(fragmentName)}.fragmentString)`);
+          this.printOnNewline('public static var requestString: String {');
+          this.withIndent(() => {
+            this.printOnNewline(`return operationString`);
+            this.withIndent(() => {
+              fragmentsReferenced.forEach(fragmentName => {
+                this.printOnNewline(`.appending(${this.helpers.structNameForFragmentName(fragmentName)}.fragmentString)`);
+              });
+            });
           });
           this.print(' }');
         }
@@ -298,28 +302,19 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
     );
 
     function flattenFragment(name: string, selections: Selection[]): Field[] {
-      console.log(`flattenFragment: ${name}`)
-
       return selections
         .filter(field => field.kind == "Field" ? field.name != "__typename" : true)
         .flatMap(selection => {
           if (selection.kind == "Field") {
-            console.log(`Flatten field: ${selection.name}`)
             return [selection] as Field[]
           }
 
           else if (selection.kind == "FragmentSpread") {
-            console.log(`Flatten recurse: ${selection.fragmentName}`)
             return flattenFragment(selection.fragmentName, selection.selectionSet!.selections)
           }
 
           return [] as Field[]
         })
-    }
-
-    if (fragmentName == "BedEncounter") {
-      let flat = flattenFragment(fragmentName, typeCase.default.selections)
-      console.log("I stop for BedEncounterModel")
     }
 
 
@@ -340,6 +335,7 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
         && field.selectionSet!.selections.length != 1
     })
 
+    // create protocols and backing models for inline fragments
     for (const relation of compositeRelations) {
 
       const relationTypeCase = typeCaseForSelectionSet(
@@ -351,13 +347,11 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
         relationTypeCase.default,
         this.context.options.mergeInFieldsFromFragmentSpreads)
         .map(field => this.helpers.propertyFromField(field as Field))
-        .filter(field => { return field.name != "__typename" });
+        .filter(field => field.name != "__typename");
 
       let subFragmentNames = relation.selectionSet!.selections
-        .filter(selection => { return selection.kind == "FragmentSpread" })
-        .map(selection => {
-          return (selection as FragmentSpread).fragmentName
-        })
+        .filter(selection => selection.kind == "FragmentSpread")
+        .map(selection => (selection as FragmentSpread).fragmentName)
 
       // if we have a single nested atomic fragment
       if (subFragmentNames.length == 1 && relationInlineFragment.length == 0) {
@@ -379,16 +373,12 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
     }
 
     let fragmentNames = typeCase.default.selections
-    .filter(selection => { return selection.kind == "FragmentSpread" })
-    .map(selection => {
-      return (selection as FragmentSpread).fragmentName
-    })
-    if (fragmentNames.length == 0) {
-      fragmentNames = ["Codable"]
-    }
+      .filter(selection => { return selection.kind == "FragmentSpread" })
+      .map(selection => (selection as FragmentSpread).fragmentName)
+    fragmentNames = fragmentNames.length == 0 ? ["Codable"] : fragmentNames.map(this.modelProtocolName)
 
     this.printOnNewline("// Creating protocol")
-    const protocolName = structName
+    const protocolName = this.modelProtocolName(structName)
     console.log(`creating protocol: ${protocolName}:${fragmentNames[0]}`)
     this.protocolDeclaration(
       {
@@ -397,47 +387,99 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
       },
       () => {
         fragmentFields.forEach(field => {
-          let { propertyName, typeName } = field;
-
-          let fragments: FragmentSpread[] = []
-          if (field.selectionSet) {
-            fragments = field.selectionSet.selections
-              .filter(field => field.kind == "Field" ? field.name != "__typename" : true)
-              .filter(field => field.kind == "FragmentSpread")
-              .map(field => field as FragmentSpread)
-            if (fragments.length == 1) {
-              typeName = fragments[0].fragmentName
-            }
-          }
+          const typeName = this.typeNameForRelation(field)
           this.comment(field.description);
           this.deprecationAttributes(field.isDeprecated, field.deprecationReason);
-          this.printOnNewline(`var ${escapeIdentifierIfNeeded(propertyName)}: ${typeName} { get }`);
+          this.printOnNewline(`var ${escapeIdentifierIfNeeded(field.propertyName)}: ${typeName} { get }`);
         });
       }
     );
 
-    const className = this.simpleModelClass(structName, [protocolName], allFields)
-    const firstAlias = allFields.find(field => field.alias != undefined)
-    if (firstAlias) {
+    const className = this.simpleModelClass(structName, [protocolName], allFields, () => {
       this.printNewline()
-      this.printOnNewline(`extension ${className}`)
+      this.printOnNewline("required init(from decoder: Decoder) throws")
       this.withinBlock(() => {
+        this.printOnNewline("let container = try decoder.container(keyedBy: CodingKeys.self)")
+        allFields.forEach(field => {
+          const { propertyName, alias } = field;
+          const isListType = this.helpers.isListType(field.type)
+          const decodeString = `${this.typeNameForRelation(field)}.self`
+          const final = `self.${propertyName} = try container.decode(${decodeString}, forKey: .${alias || propertyName})`
+          this.printOnNewline(final)
+        });
+      });
+    })
+    const firstAlias = allFields.find(field => field.alias != undefined)
+
+    this.printNewline()
+    this.printOnNewline(`extension ${className}`)
+    this.withinBlock(() => {
+      // generate CodingKeys override aliases have been defined
+      if (firstAlias) {
         this.printOnNewline("private enum CodingKeys: String, CodingKey")
         this.withinBlock(() => {
           allFields.forEach(field => {
-            const { name, alias } = field;
-            this.printOnNewline(`case ${alias || name} = "${name}"`)
+            const { name, propertyName, alias } = field;
+            this.printOnNewline(`case ${alias || propertyName} = "${alias || propertyName}"`)
           });
         })
+      }
+
+      this.printOnNewline("func encode(to encoder: Encoder) throws")
+      this.withinBlock(() => {
+        this.printOnNewline(`var container = encoder.container(keyedBy: CodingKeys.self)`)
+        allFields.forEach(field => {
+          const { name, propertyName, alias } = field;
+          this.printOnNewline(`try container.encode(${propertyName}, forKey: .${alias || propertyName})`)
+        });
       })
+    })
+
+    this.structDeclaration(
+      {
+        structName: `Any${className}`,
+        adoptedProtocols: ["Codable"]
+      },
+      () => {
+        this.printOnNewline(`var base: ${protocolName}`)
+        this.printOnNewline(`init(_ base: ${protocolName}) { self.base = base }`)
+        this.printOnNewline(`public init(from decoder: Decoder) throws { self.base = try ${className}.init(from: decoder) }`)
+        this.printOnNewline(`public func encode(to encoder: Encoder) throws { try base.encode(to: encoder) }`)
+      });
+  }
+
+  typeNameForRelation(field: Field & Property & Struct) {
     }
+    if (field.selectionSet) {
+      const fragments = field.selectionSet.selections
+        .filter(field => field.kind == "Field" ? field.name != "__typename" : true)
+        .filter(field => field.kind == "FragmentSpread")
+        .map(field => field as FragmentSpread)
+      if (fragments.length == 1) {
+        const fragmentName = fragments[0].fragmentName
+        return field.typeName.replace(field.structName, this.modelProtocolName(fragmentName))
+      }
+      else {
+        return field.typeName.replace(field.structName, this.modelProtocolName(field.typeName))
+      }
+    }
+
+    return field.typeName
   }
 
   modelClassName(baseName: string): string {
     return `${baseName}Model`
   }
 
-  simpleModelClass(baseName: string, adoptedProtocols: string[], fields: (Field & Property & Struct)[]): string {
+  modelProtocolName(baseName: string): string {
+    // return `${baseName}X`
+    return `${baseName}`
+  }
+
+
+  simpleModelClass(baseName: string, adoptedProtocols: string[],
+    fields: (Field & Property & Struct)[],
+    closure: Function): string {
     const className = this.modelClassName(baseName)
     this.classDeclaration(
       {
@@ -448,7 +490,8 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
       () => {
 
         let properties = fields.map(field => {
-          const { propertyName, name, typeName, type, isOptional } = field;
+          const { propertyName, name, type, isOptional } = field;
+          const typeName = this.typeNameForRelation(field);
           return { name, propertyName, type, typeName, isOptional };
         });
 
@@ -459,7 +502,8 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
         this.printNewline();
 
         fields.forEach(field => {
-          const { responseKey, propertyName, name, alias, typeName, type, isOptional, isConditional } = field;
+          const { responseKey, propertyName, name, alias, type, isOptional, isConditional } = field;
+          const typeName = this.typeNameForRelation(field)
 
           const unmodifiedFieldType = getNamedType(type);
 
@@ -468,6 +512,10 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
           this.deprecationAttributes(field.isDeprecated, field.deprecationReason);
           this.printOnNewline(`public var ${escapeIdentifierIfNeeded(propertyName)}: ${typeName}`);
         });
+
+        if (closure != undefined) {
+          closure()
+        }
       }
     );
 
@@ -772,13 +820,13 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
     const { responseKey, propertyName, type, isConditional, structName } = field;
     const valueExpression = isCompositeType(getNamedType(type))
       ? this.helpers.mapExpressionForType(
-          type,
-          isConditional,
-          expression => `${expression}.snapshot`,
-          escapeIdentifierIfNeeded(propertyName),
-          structName!,
-          'Snapshot'
-        )
+        type,
+        isConditional,
+        expression => `${expression}.snapshot`,
+        escapeIdentifierIfNeeded(propertyName),
+        structName!,
+        'Snapshot'
+      )
       : escapeIdentifierIfNeeded(propertyName);
     return `"${responseKey}": ${valueExpression}`;
   }
@@ -956,8 +1004,8 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
                   `"${name}"`,
                   alias ? `alias: "${alias}"` : null,
                   args &&
-                    args.length &&
-                    `arguments: ${this.helpers.dictionaryLiteralForFieldArguments(args)}`,
+                  args.length &&
+                  `arguments: ${this.helpers.dictionaryLiteralForFieldArguments(args)}`,
                   `type: ${this.helpers.fieldTypeEnum(type, structName)}`
                 ],
                 ', '
@@ -1024,7 +1072,7 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
 
     this.printNewlineIfNeeded();
     this.comment(description);
-    this.printOnNewline(`public enum ${name}: RawRepresentable, Equatable, Apollo.JSONDecodable, Apollo.JSONEncodable`);
+    this.printOnNewline(`public enum ${name}: RawRepresentable, Equatable, Codable, Apollo.JSONDecodable, Apollo.JSONEncodable`);
     this.withinBlock(() => {
       this.printOnNewline('public typealias RawValue = String')
 

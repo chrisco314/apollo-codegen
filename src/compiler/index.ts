@@ -92,6 +92,9 @@ export interface Argument {
 
 export type Selection = Field | TypeCondition | BooleanCondition | FragmentSpread;
 
+
+// Really need common base with uniform optional name field
+
 export interface Field {
   kind: 'Field';
   responseKey: string;

@@ -32,17 +32,43 @@ export function escapedString(string: string) {
 }
 
 // prettier-ignore
+// way way way too aggressive, keywords are context sensitive
 const reservedKeywords = new Set(['associatedtype', 'class', 'deinit', 'enum', 'extension',
-  'fileprivate', 'func', 'import', 'init', 'inout', 'internal', 'let', 'open',
+  'fileprivate', 'func',
+  // 'import',
+  'init', 'inout', 'internal', 'let',
+  // 'open',
   'operator', 'private', 'protocol', 'public', 'static', 'struct', 'subscript',
   'typealias', 'var', 'break', 'case', 'continue', 'default', 'defer', 'do',
   'else', 'fallthrough', 'for', 'guard', 'if', 'in', 'repeat', 'return',
   'switch', 'where', 'while', 'as', 'Any', 'catch', 'false', 'is', 'nil',
   'rethrows', 'super', 'self', 'Self', 'throw', 'throws', 'true', 'try',
-  'associativity', 'convenience', 'dynamic', 'didSet', 'final', 'get', 'infix',
-  'indirect', 'lazy', 'left', 'mutating', 'none', 'nonmutating', 'optional',
-  'override', 'postfix', 'precedence', 'prefix', 'Protocol', 'required', 'right',
-  'set', 'Type', 'unowned', 'weak', 'willSet']);
+  // 'associativity',
+  // 'convenience',
+  'dynamic',
+  // 'didSet',
+  // 'final',
+  // 'get',
+  // 'infix',
+  // 'indirect',
+  'lazy',
+  // 'left',
+  'mutating',
+  // 'none',
+  // 'nonmutating',
+  'optional',
+  'override',
+  // 'postfix',
+  'precedence',
+  // 'prefix',
+  'protocol',
+  'required',
+  // 'right',
+  // 'set',
+  // 'Type',
+  'unowned', 'weak',
+  // 'willSet'
+]);
 
 export function escapeIdentifierIfNeeded(identifier: string) {
   if (reservedKeywords.has(identifier)) {
