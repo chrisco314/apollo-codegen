@@ -51,6 +51,16 @@ export function generateSource(
     generator.withinFile(`Types.graphql.swift`, () => {
       generator.fileHeader();
 
+      generator.protocolDeclaration(
+        {
+          protocolName: "GraphQLQueryable",
+          adoptedProtocols: []
+        },
+        () => {
+          generator.printOnNewline(`static var fragmentString: String { get }`);
+        }
+      );
+
       generator.namespaceDeclaration(context.options.namespace, () => {
         context.typesUsed.forEach(type => {
           generator.typeDeclarationForGraphQLType(type);
@@ -83,23 +93,11 @@ export function generateSource(
             }
           });
         });
-      });
-
-      generator.withinFile(`${path.basename(inputFilePath)}.swift`, () => {
-        generator.fileHeader();
 
         generator.namespaceExtensionDeclaration(context.options.namespace, () => {
-
-          Object.values(context.fragments).forEach(fragment => {
-            if (fragment.filePath === inputFilePath) {
-              console.log(fragment.filePath)
-              generator.structDeclarationForFragment(fragment);
-            }
-          });
-
           Object.values(context.operations).forEach(operation => {
             if (operation.filePath === inputFilePath) {
-              generator.classDeclarationForOperation(operation);
+              generator.codableOperation(operation);
             }
           });
         });
@@ -189,6 +187,105 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
     this.printNewline();
     this.printOnNewline('import Apollo');
   }
+
+
+  codableOperation(operation: Operation) {
+    const { operationName, operationType, variables, source, selectionSet } = operation;
+
+    let className;
+    let protocol;
+
+    switch (operationType) {
+      case 'query':
+        className = `${this.helpers.operationClassName(operationName)}Query`;
+        protocol = 'GraphQLQuery';
+        break;
+      case 'mutation':
+        className = `${this.helpers.operationClassName(operationName)}Mutation`;
+        protocol = 'GraphQLMutation';
+        break;
+      case 'subscription':
+        className = `${this.helpers.operationClassName(operationName)}Subscription`;
+        protocol = 'GraphQLSubscription';
+        break;
+      default:
+        throw new GraphQLError(`Unsupported operation type "${operationType}"`);
+    }
+
+    this.classDeclaration(
+      {
+        className,
+        modifiers: ['public', 'final'],
+        adoptedProtocols: [protocol]
+      },
+      () => {
+        if (source) {
+          this.printOnNewline('public static let operationString =');
+          this.withIndent(() => {
+            this.multilineString(source);
+          });
+        }
+
+        const fragmentsReferenced = collectFragmentsReferenced(
+          operation.selectionSet,
+          this.context.fragments
+        );
+
+        if (this.context.options.generateOperationIds) {
+          const { operationId } = generateOperationId(operation, this.context.fragments, fragmentsReferenced);
+          operation.operationId = operationId;
+          this.printNewlineIfNeeded();
+          this.printOnNewline(`public static let operationIdentifier: String? = "${operationId}"`);
+        }
+
+        if (fragmentsReferenced.size > 0) {
+          this.printNewlineIfNeeded();
+          this.printOnNewline('public static var requestString: String {');
+          this.withIndent(() => {
+            this.printOnNewline(`return operationString`);
+            this.withIndent(() => {
+              fragmentsReferenced.forEach(fragmentName => {
+                this.printOnNewline(`.appending(${this.modelClassName(fragmentName)}.fragmentString)`);
+              });
+            });
+          });
+          this.printOnNewline(' }');
+        }
+
+        if (variables && variables.length > 0) {
+          this.printNewlineIfNeeded();
+          const properties = variables.map(({ name, type }) => {
+            const typeName = this.helpers.typeNameFromGraphQLType(type);
+            const isOptional = !(
+              type instanceof GraphQLNonNull ||
+              (type instanceof GraphQLList && type.ofType instanceof GraphQLNonNull)
+            );
+            return { name, propertyName: name, type, typeName, isOptional };
+          });
+
+          this.propertyDeclarations(properties);
+
+          this.printNewlineIfNeeded();
+          this.initializerDeclarationForProperties(properties);
+
+          this.printNewlineIfNeeded();
+          this.printOnNewline(`public var variables: GraphQLMap?`);
+          this.withinBlock(() => {
+            this.printOnNewline(
+              wrap(
+                `return [`,
+                join(properties.map(({ name, propertyName }) => `"${name}": ${escapeIdentifierIfNeeded(propertyName)}`), ', ') || ':',
+                `]`
+              )
+            );
+          });
+        } else {
+          this.initializerDeclarationForProperties([]);
+        }
+      }
+    );
+  }
+
 
   classDeclarationForOperation(operation: Operation) {
     const { operationName, operationType, variables, source, selectionSet } = operation;
@@ -402,8 +499,11 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
         this.printOnNewline("let container = try decoder.container(keyedBy: CodingKeys.self)")
         allFields.forEach(field => {
           const { propertyName, alias } = field;
-          const isListType = this.helpers.isListType(field.type)
-          const decodeString = `${this.typeNameForRelation(field)}.self`
+          const customList = this.helpers.isListType(field.type) && !this.helpers.isNativeType(field.type)
+          let relationTypeName = this.typeNameForRelation(field)
+          const decodeString = customList
+            ? `${relationTypeName}.self`
+            : `${this.modelClassName(relationTypeName)}.self`
           const final = `self.${propertyName} = try container.decode(${decodeString}, forKey: .${alias || propertyName})`
           this.printOnNewline(final)
         });
@@ -414,7 +514,8 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
     this.printNewline()
     this.printOnNewline(`extension ${className}`)
     this.withinBlock(() => {
-      // generate CodingKeys override aliases have been defined
+
+      // generate CodingKeys if override aliases have been defined
       if (firstAlias) {
         this.printOnNewline("private enum CodingKeys: String, CodingKey")
         this.withinBlock(() => {
@@ -425,14 +526,31 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
         })
       }
 
+      // Encodable support
+      this.printNewline()
       this.printOnNewline("func encode(to encoder: Encoder) throws")
       this.withinBlock(() => {
         this.printOnNewline(`var container = encoder.container(keyedBy: CodingKeys.self)`)
         allFields.forEach(field => {
-          const { name, propertyName, alias } = field;
-          this.printOnNewline(`try container.encode(${propertyName}, forKey: .${alias || propertyName})`)
+          const { propertyName, alias } = field;
+          const mapToAny = this.helpers.isListType(field.type) && !this.helpers.isNativeType(field.type)
+          const typeName =  this.modelClassName(this.typeNameForRelation(field))
+          const encodeString = mapToAny ? `${propertyName}.map(Any${typeName}.inner)` : propertyName
+          this.printOnNewline(`try container.encode(${encodeString}, forKey: .${alias || propertyName})`)
         });
       })
+    })
+
+    // GraphQLQueryable support
+    this.printNewline()
+    this.printOnNewline(`extension ${className}: GraphQLQueryable`)
+    this.withinBlock(() => {
+      if (source) {
+        this.printOnNewline('public static let fragmentString =');
+        this.withIndent(() => {
+          this.multilineString(source);
+        });
+      }
     })
 
     this.structDeclaration(
@@ -499,8 +617,7 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
         this.initializerDeclarationForProperties(properties);
 
         // fields
-        this.printNewline();
-
+        this.printNewlineIfNeeded()
         fields.forEach(field => {
           const { responseKey, propertyName, name, alias, type, isOptional, isConditional } = field;
           const typeName = this.typeNameForRelation(field)
@@ -936,6 +1053,7 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
   }
 
   initializerDeclarationForProperties(properties: Property[]) {
+    if (properties.length == 0) { return }
     this.printOnNewline(`public init`);
     this.parametersForProperties(properties);
 
