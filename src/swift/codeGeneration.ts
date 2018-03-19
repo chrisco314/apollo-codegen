@@ -41,7 +41,6 @@ export function generateSource(
 ): SwiftAPIGenerator {
   const generator = new SwiftAPIGenerator(context);
 
-  console.log("generateSource")
   // context.options.passthroughCustomScalars
 
   if (options.codable) {
@@ -85,7 +84,6 @@ export function generateSource(
         generator.fileHeader();
 
         generator.namespaceExtensionDeclaration(context.options.namespace, () => {
-
           Object.values(context.fragments).forEach(fragment => {
             if (fragment.filePath === inputFilePath) {
               console.log(fragment.filePath)
@@ -103,8 +101,6 @@ export function generateSource(
         });
       });
     }
-
-    console.log("Returning from generateSource")
   }
 
   else if (outputIndividualFiles) {
@@ -162,6 +158,7 @@ export function generateSource(
         console.log(fragment.filePath)
         generator.structDeclarationForFragment(fragment);
       });
+
       // operation types: queries and mutations
       Object.values(context.operations).forEach(operation => {
         generator.classDeclarationForOperation(operation);
@@ -343,11 +340,11 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
             this.printOnNewline(`return operationString`);
             this.withIndent(() => {
               fragmentsReferenced.forEach(fragmentName => {
-                this.printOnNewline(`.appending(${this.helpers.structNameForFragmentName(fragmentName)}.fragmentString)`);
+                this.printOnNewline(`.appending(${this.modelClassName(fragmentName)}.fragmentString)`);
               });
             });
           });
-          this.print(' }');
+          this.printOnNewline(' }');
         }
 
         this.printNewlineIfNeeded();
@@ -414,7 +411,6 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
         })
     }
 
-
     const allFields = collectAndMergeFieldsFromSelections(
       flattenFragment(fragmentName, typeCase.default.selections),
       typeCase.default.possibleTypes,
@@ -427,6 +423,7 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
       this.context.options.mergeInFieldsFromFragmentSpreads)
       .map(field => this.helpers.propertyFromField(field as Field))
       .filter(field => { return field.name != "__typename" });
+
     let compositeRelations = fragmentFields.filter(field => {
       return field.selectionSet != undefined
         && field.selectionSet!.selections.length != 1
@@ -499,11 +496,7 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
         this.printOnNewline("let container = try decoder.container(keyedBy: CodingKeys.self)")
         allFields.forEach(field => {
           const { propertyName, alias } = field;
-          const customList = this.helpers.isListType(field.type) && !this.helpers.isNativeType(field.type)
-          let relationTypeName = this.typeNameForRelation(field)
-          const decodeString = customList
-            ? `${relationTypeName}.self`
-            : `${this.modelClassName(relationTypeName)}.self`
+          const decodeString = `${this.concreteRelationName(field)}.self`
           const final = `self.${propertyName} = try container.decode(${decodeString}, forKey: .${alias || propertyName})`
           this.printOnNewline(final)
         });
@@ -534,8 +527,8 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
         allFields.forEach(field => {
           const { propertyName, alias } = field;
           const mapToAny = this.helpers.isListType(field.type) && !this.helpers.isNativeType(field.type)
-          const typeName =  this.modelClassName(this.typeNameForRelation(field))
-          const encodeString = mapToAny ? `${propertyName}.map(Any${typeName}.inner)` : propertyName
+          const typeName = this.concreteListBaseType(field)
+          const encodeString = mapToAny ? `${propertyName}.map(Any${typeName}.base)` : propertyName
           this.printOnNewline(`try container.encode(${encodeString}, forKey: .${alias || propertyName})`)
         });
       })
@@ -567,7 +560,6 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
   }
 
   typeNameForRelation(field: Field & Property & Struct) {
-    }
     if (field.selectionSet) {
       const fragments = field.selectionSet.selections
         .filter(field => field.kind == "Field" ? field.name != "__typename" : true)
@@ -579,6 +571,44 @@ export class SwiftAPIGenerator extends SwiftGenerator<CompilerContext> {
       }
       else {
         return field.typeName.replace(field.structName, this.modelProtocolName(field.typeName))
+      }
+    }
+
+    return field.typeName
+  }
+
+  concreteRelationName(field: Field & Property & Struct) {
+
+    if (field.selectionSet) {
+      const fragments = field.selectionSet.selections
+        .filter(field => field.kind == "Field" ? field.name != "__typename" : true)
+        .filter(field => field.kind == "FragmentSpread")
+        .map(field => field as FragmentSpread)
+      if (fragments.length == 1) {
+        const fragmentName = fragments[0].fragmentName
+        return field.typeName.replace(field.structName, this.modelClassName(fragmentName))
+      }
+      else {
+        return field.typeName.replace(field.structName, this.modelClassName(field.typeName))
+      }
+    }
+
+    return field.typeName
+  }
+
+  concreteListBaseType(field: Field & Property & Struct) {
+
+    if (field.selectionSet) {
+      const fragments = field.selectionSet.selections
+        .filter(field => field.kind == "Field" ? field.name != "__typename" : true)
+        .filter(field => field.kind == "FragmentSpread")
+        .map(field => field as FragmentSpread)
+      if (fragments.length == 1) {
+        const fragmentName = fragments[0].fragmentName
+        return this.modelClassName(fragmentName)
+      }
+      else {
+        return this.modelClassName(field.typeName)
       }
     }
 
