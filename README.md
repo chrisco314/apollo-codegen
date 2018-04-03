@@ -8,6 +8,7 @@ It currently generates Swift code, TypeScript annotations, Flow annotations, and
 
 See [Apollo iOS](https://github.com/apollographql/apollo-ios) for details on the mapping from GraphQL results to Swift types, as well as runtime support for executing queries and mutations. For Scala, see [React Apollo Scala.js](https://github.com/apollographql/react-apollo-scalajs) for details on how to use generated Scala code in a Scala.js app with Apollo Client.
 
+
 ## Usage
 
 If you want to experiment with the tool, you can install the `apollo-codegen` command globally:
@@ -58,6 +59,10 @@ apollo-codegen generate **/*.graphql --schema schema.json --target flow --output
 # Scala
 apollo-codegen generate **/*.graphql --schema schema.json --target scala --output operation-result-types.scala
 ```
+
+#### `codable`: Experimental (WIP) support for Codable backed Swift protocols
+
+To generate Swift protocol models that use native Swift's `Codable` mechanism, checkout the `protocol_support` branch, and specify the command line option: `--codable`
 
 #### `gql` template support
 
